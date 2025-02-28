@@ -13,6 +13,6 @@
     "intervalSeconds": 15
   },
   "threads": {
-    "maxWorkers": 10
+    "maxWorkers": 1
   }
 }
