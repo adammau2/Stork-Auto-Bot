@@ -65,7 +65,7 @@ node index.js
     "intervalSeconds": 15
   },
   "threads": {
-    "maxWorkers": 10
+    "maxWorkers": 1
   }
 }
 ```
@@ -100,7 +100,7 @@ The bot will:
 In your `config.json` file, you can adjust:
 
 - `stork.intervalSeconds`: How often the validation process runs in seconds (default: 15)
-- `threads.maxWorkers`: Number of concurrent validation workers (default: 10)
+- `threads.maxWorkers`: Number of concurrent validation workers (default: 1)
 
 ## Troubleshooting
 
