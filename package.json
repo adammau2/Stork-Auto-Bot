@@ -29,6 +29,7 @@
     "axios": "^1.6.2",
     "fs": "0.0.1-security",
     "https-proxy-agent": "^7.0.2",
+    "luxon": "^3.5.0",
     "path": "^0.12.7",
     "socks-proxy-agent": "^8.0.1"
   },

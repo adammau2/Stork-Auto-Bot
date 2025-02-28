@@ -1,15 +1,18 @@
 {
-  "cognito": {
-    "region": "ap-northeast-1",
-    "clientId": "5msns4n49hmg3dftp2tp1t2iuh",
-    "userPoolId": "ap-northeast-1_M22I44OpC",
-    "username": "YOUR EMAIL",
-    "password": "YOUR PASSWORD"
-  },
+  "cognito": [
+    {
+      "region": "ap-northeast-1",
+      "clientId": "5msns4n49hmg3dftp2tp1t2iuh",
+      "userPoolId": "ap-northeast-1_M22I44OpC",
+      "username": "",  // Add your username here
+      "password": ""   // Add your password here
+    }
+    // Add more accounts by copying the above object and pasting it below, then filling in the details
+  ],
   "stork": {
-    "intervalSeconds": 5
+    "intervalSeconds": 15
   },
   "threads": {
-    "maxWorkers": 1
+    "maxWorkers": 10
   }
 }

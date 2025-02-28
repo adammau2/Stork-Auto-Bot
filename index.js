@@ -5,6 +5,7 @@ const path = require('path');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const { HttpsProxyAgent }= require('https-proxy-agent');
 const { SocksProxyAgent } = require('socks-proxy-agent');
+const { DateTime } = require('luxon');
 
 global.navigator = { userAgent: 'node' };
 
@@ -13,8 +14,6 @@ function loadConfig() {
   try {
     const configPath = path.join(__dirname, 'config.json');
     if (!fs.existsSync(configPath)) {
-      log(`Config file not found at ${configPath}, using default configuration`, 'WARN');
-      // Create default config file if it doesn't exist
       const defaultConfig = {
         cognito: {
           region: 'ap-northeast-1',
@@ -35,10 +34,8 @@ function loadConfig() {
     }
     
     const userConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    log('Configuration loaded successfully from config.json');
     return userConfig;
   } catch (error) {
-    log(`Error loading config: ${error.message}`, 'ERROR');
     throw new Error('Failed to load configuration');
   }
 }
@@ -56,7 +53,7 @@ const config = {
     baseURL: 'https://app-api.jp.stork-oracle.network/v1',
     authURL: 'https://api.jp.stork-oracle.network/auth',
     tokenPath: path.join(__dirname, 'tokens.json'),
-    intervalSeconds: userConfig.stork?.intervalSeconds || 10,
+    intervalSeconds: userConfig.stork?.intervalSeconds || 15,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
     origin: 'chrome-extension://knnliglhgkmlblppdejchidfihjnockl'
   },
@@ -66,16 +63,21 @@ const config = {
   }
 };
 
+const userConfigs = userConfig.cognito.map((accountConfig, index) => ({
+  ...config,
+  cognito: {
+    region: accountConfig.region,
+    clientId: accountConfig.clientId,
+    userPoolId: accountConfig.userPoolId,
+    username: accountConfig.username,
+    password: accountConfig.password
+  },
+  accountIndex: index
+}));
+
 function validateConfig() {
-  if (!config.cognito.username || !config.cognito.password) {
-    log('ERROR: Username and password must be set in config.json', 'ERROR');
-    console.log('\nPlease update your config.json file with your credentials:');
-    console.log(JSON.stringify({
-      cognito: {
-        username: "YOUR_EMAIL",
-        password: "YOUR_PASSWORD"
-      }
-    }, null, 2));
+  if (!userConfig.cognito || userConfig.cognito.length === 0) {
+    console.error('ERROR: At least one account must be set in config.json');
     return false;
   }
   return true;
@@ -85,23 +87,18 @@ const poolData = { UserPoolId: config.cognito.userPoolId, ClientId: config.cogni
 const userPool = new AmazonCognitoIdentity.CognitoUserPool(poolData);
 
 function getTimestamp() {
-  const now = new Date();
-  return now.toISOString().replace('T', ' ').substr(0, 19);
+  const now = DateTime.now().setZone('Asia/Jakarta');
+  return now.toFormat('yyyy-MM-dd HH:mm:ss') + ' WIB';
 }
 
 function getFormattedDate() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-}
-
-function log(message, type = 'INFO') {
-  console.log(`[${getFormattedDate()}] [${type}] ${message}`);
+  const now = DateTime.now().setZone('Asia/Jakarta');
+  return now.toFormat('yyyy-MM-dd HH:mm:ss') + ' WIB';
 }
 
 function loadProxies() {
   try {
     if (!fs.existsSync(config.threads.proxyFile)) {
-      log(`Proxy file not found at ${config.threads.proxyFile}, creating empty file`, 'WARN');
       fs.writeFileSync(config.threads.proxyFile, '', 'utf8');
       return [];
     }
@@ -110,10 +107,8 @@ function loadProxies() {
       .split('\n')
       .map(line => line.trim())
       .filter(line => line && !line.startsWith('#'));
-    log(`Loaded ${proxies.length} proxies from ${config.threads.proxyFile}`);
     return proxies;
   } catch (error) {
-    log(`Error loading proxies: ${error.message}`, 'ERROR');
     return [];
   }
 }
@@ -158,12 +153,13 @@ class CognitoAuth {
 }
 
 class TokenManager {
-  constructor() {
+  constructor(accountConfig) {
     this.accessToken = null;
     this.refreshToken = null;
     this.idToken = null;
     this.expiresAt = null;
-    this.auth = new CognitoAuth(config.cognito.username, config.cognito.password);
+    this.auth = new CognitoAuth(accountConfig.cognito.username, accountConfig.cognito.password);
+    this.tokenPath = path.join(__dirname, `tokens_${accountConfig.accountIndex}.json`);
   }
 
   async getValidToken() {
@@ -180,7 +176,6 @@ class TokenManager {
       let result = this.refreshToken ? await this.auth.refreshSession(this.refreshToken) : await this.auth.authenticate();
       await this.updateTokens(result);
     } catch (error) {
-      log(`Token refresh/auth error: ${error.message}`, 'ERROR');
       throw error;
     }
   }
@@ -191,32 +186,27 @@ class TokenManager {
     this.refreshToken = result.refreshToken;
     this.expiresAt = Date.now() + result.expiresIn;
     const tokens = { accessToken: this.accessToken, idToken: this.idToken, refreshToken: this.refreshToken, isAuthenticated: true, isVerifying: false };
-    await saveTokens(tokens);
-    log('Tokens updated and saved to tokens.json');
+    await saveTokens(tokens, this.tokenPath);
   }
 }
 
-async function getTokens() {
+async function getTokens(tokenPath) {
   try {
-    if (!fs.existsSync(config.stork.tokenPath)) throw new Error(`Tokens file not found at ${config.stork.tokenPath}`);
-    const tokensData = await fs.promises.readFile(config.stork.tokenPath, 'utf8');
+    if (!fs.existsSync(tokenPath)) throw new Error(`Tokens file not found at ${tokenPath}`);
+    const tokensData = await fs.promises.readFile(tokenPath, 'utf8');
     const tokens = JSON.parse(tokensData);
     if (!tokens.accessToken || tokens.accessToken.length < 20) throw new Error('Invalid access token');
-    log(`Successfully read access token: ${tokens.accessToken.substring(0, 10)}...`);
     return tokens;
   } catch (error) {
-    log(`Error reading tokens: ${error.message}`, 'ERROR');
     throw error;
   }
 }
 
-async function saveTokens(tokens) {
+async function saveTokens(tokens, tokenPath) {
   try {
-    await fs.promises.writeFile(config.stork.tokenPath, JSON.stringify(tokens, null, 2), 'utf8');
-    log('Tokens saved successfully');
+    await fs.promises.writeFile(tokenPath, JSON.stringify(tokens, null, 2), 'utf8');
     return true;
   } catch (error) {
-    log(`Error saving tokens: ${error.message}`, 'ERROR');
     return false;
   }
 }
@@ -230,7 +220,6 @@ function getProxyAgent(proxy) {
 
 async function refreshTokens(refreshToken) {
   try {
-    log('Refreshing access token via Stork API...');
     const response = await axios({
       method: 'POST',
       url: `${config.stork.authURL}/refresh`,
@@ -249,17 +238,14 @@ async function refreshTokens(refreshToken) {
       isVerifying: false
     };
     await saveTokens(tokens);
-    log('Token refreshed successfully via Stork API');
     return tokens;
   } catch (error) {
-    log(`Token refresh failed: ${error.message}`, 'ERROR');
     throw error;
   }
 }
 
 async function getSignedPrices(tokens) {
   try {
-    log('Fetching signed prices data...');
     const response = await axios({
       method: 'GET',
       url: `${config.stork.baseURL}/stork_signed_prices`,
@@ -281,10 +267,8 @@ async function getSignedPrices(tokens) {
         ...assetData
       };
     });
-    log(`Successfully retrieved ${result.length} signed prices`);
     return result;
   } catch (error) {
-    log(`Error getting signed prices: ${error.message}`, 'ERROR');
     throw error;
   }
 }
@@ -304,17 +288,16 @@ async function sendValidation(tokens, msgHash, isValid, proxy) {
       httpsAgent: agent,
       data: { msg_hash: msgHash, valid: isValid }
     });
-    log(`✓ Validation successful for ${msgHash.substring(0, 10)}... via ${proxy || 'direct'}`);
+    //console.log(`✓ Validation successful for ${msgHash.substring(0, 10)}... via ${proxy || 'direct'}`);
     return response.data;
   } catch (error) {
-    log(`✗ Validation failed for ${msgHash.substring(0, 10)}...: ${error.message}`, 'ERROR');
+    //console.log(`✗ Validation failed for ${msgHash.substring(0, 10)}...: ${error.message}`);
     throw error;
   }
 }
 
 async function getUserStats(tokens) {
   try {
-    log('Fetching user stats...');
     const response = await axios({
       method: 'GET',
       url: `${config.stork.baseURL}/me`,
@@ -327,28 +310,23 @@ async function getUserStats(tokens) {
     });
     return response.data.data;
   } catch (error) {
-    log(`Error getting user stats: ${error.message}`, 'ERROR');
     throw error;
   }
 }
 
 function validatePrice(priceData) {
   try {
-    log(`Validating data for ${priceData.asset || 'unknown asset'}`);
     if (!priceData.msg_hash || !priceData.price || !priceData.timestamp) {
-      log('Incomplete data, considered invalid', 'WARN');
       return false;
     }
     const currentTime = Date.now();
     const dataTime = new Date(priceData.timestamp).getTime();
     const timeDiffMinutes = (currentTime - dataTime) / (1000 * 60);
     if (timeDiffMinutes > 60) {
-      log(`Data too old (${Math.round(timeDiffMinutes)} minutes ago)`, 'WARN');
       return false;
     }
     return true;
   } catch (error) {
-    log(`Validation error: ${error.message}`, 'ERROR');
     return false;
   }
 }
@@ -360,20 +338,19 @@ if (!isMainThread) {
     try {
       const isValid = validatePrice(priceData);
       await sendValidation(tokens, priceData.msg_hash, isValid, proxy);
-      parentPort.postMessage({ success: true, msgHash: priceData.msg_hash, isValid });
+      parentPort.postMessage({ success: true, msgHash: priceData.msg_hash, isValid, proxy });
     } catch (error) {
-      parentPort.postMessage({ success: false, error: error.message, msgHash: priceData.msg_hash });
+      parentPort.postMessage({ success: false, error: error.message, msgHash: priceData.msg_hash, proxy });
     }
   }
 
   validateAndSend();
 } else {
-  let previousStats = { validCount: 0, invalidCount: 0 };
+  let previousStats = userConfigs.map(() => ({ validCount: 0, invalidCount: 0, lastValidatedAt: 'Never', status: 'Active', proxy: 'None' }));
 
-  async function runValidationProcess(tokenManager) {
+  async function runValidationProcess(tokenManager, accountIndex) {
     try {
-      log('--------- STARTING VALIDATION PROCESS ---------');
-      const tokens = await getTokens();
+      const tokens = await getTokens(tokenManager.tokenPath);
       const initialUserData = await getUserStats(tokens);
 
       if (!initialUserData || !initialUserData.stats) {
@@ -383,22 +360,20 @@ if (!isMainThread) {
       const initialValidCount = initialUserData.stats.stork_signed_prices_valid_count || 0;
       const initialInvalidCount = initialUserData.stats.stork_signed_prices_invalid_count || 0;
 
-      if (previousStats.validCount === 0 && previousStats.invalidCount === 0) {
-        previousStats.validCount = initialValidCount;
-        previousStats.invalidCount = initialInvalidCount;
+      if (previousStats[accountIndex].validCount === 0 && previousStats[accountIndex].invalidCount === 0) {
+        previousStats[accountIndex].validCount = initialValidCount;
+        previousStats[accountIndex].invalidCount = initialInvalidCount;
       }
 
       const signedPrices = await getSignedPrices(tokens);
       const proxies = loadProxies();
 
       if (!signedPrices || signedPrices.length === 0) {
-        log('No data to validate');
         const userData = await getUserStats(tokens);
-        displayStats(userData);
+        updateStats(userData, accountIndex, null);
         return;
       }
 
-      log(`Processing ${signedPrices.length} data points with ${config.threads.maxWorkers} workers...`);
       const workers = [];
 
       const chunkSize = Math.ceil(signedPrices.length / config.threads.maxWorkers);
@@ -417,61 +392,85 @@ if (!isMainThread) {
               workerData: { priceData, tokens, proxy }
             });
             worker.on('message', resolve);
-            worker.on('error', (error) => resolve({ success: false, error: error.message }));
-            worker.on('exit', () => resolve({ success: false, error: 'Worker exited' }));
+            worker.on('error', (error) => resolve({ success: false, error: error.message, proxy }));
+            worker.on('exit', () => resolve({ success: false, error: 'Worker exited', proxy }));
           }));
         });
       }
 
       const results = await Promise.all(workers);
       const successCount = results.filter(r => r.success).length;
-      log(`Processed ${successCount}/${results.length} validations successfully`);
 
       const updatedUserData = await getUserStats(tokens);
       const newValidCount = updatedUserData.stats.stork_signed_prices_valid_count || 0;
       const newInvalidCount = updatedUserData.stats.stork_signed_prices_invalid_count || 0;
 
-      const actualValidIncrease = newValidCount - previousStats.validCount;
-      const actualInvalidIncrease = newInvalidCount - previousStats.invalidCount;
+      const actualValidIncrease = newValidCount - previousStats[accountIndex].validCount;
+      const actualInvalidIncrease = newInvalidCount - previousStats[accountIndex].invalidCount;
 
-      previousStats.validCount = newValidCount;
-      previousStats.invalidCount = newInvalidCount;
+      previousStats[accountIndex].validCount = newValidCount;
+      previousStats[accountIndex].invalidCount = newInvalidCount;
 
-      displayStats(updatedUserData);
-      log(`--------- VALIDATION SUMMARY ---------`);
-      log(`Total data processed: ${actualValidIncrease + actualInvalidIncrease}`);
-      log(`Successful: ${actualValidIncrease}`);
-      log(`Failed: ${actualInvalidIncrease}`);
-      log('--------- COMPLETE ---------');
+      updateStats(updatedUserData, accountIndex, proxies.length > 0 ? proxies[accountIndex % proxies.length] : null);
     } catch (error) {
-      log(`Validation process stopped: ${error.message}`, 'ERROR');
+      previousStats[accountIndex].status = `Error: ${error.message}`;
     }
   }
 
-  function displayStats(userData) {
+  function updateStats(userData, accountIndex, proxy) {
     if (!userData || !userData.stats) {
-      log('No valid stats data available to display', 'WARN');
       return;
     }
 
+    previousStats[accountIndex].validCount = userData.stats.stork_signed_prices_valid_count || 0;
+    previousStats[accountIndex].invalidCount = userData.stats.stork_signed_prices_invalid_count || 0;
+    previousStats[accountIndex].lastValidatedAt = getFormattedDate();
+    previousStats[accountIndex].status = 'Active';
+    previousStats[accountIndex].proxy = proxy || 'None';
+  }
+
+  function displayAllStats() {
     console.clear();
     console.log('=============================================');
-    console.log('   STORK ORACLE AUTO BOT - AIRDROP INSIDERS  ');
+    console.log('   STORK ORACLE AUTO BOT - ALL ACCOUNTS  ');
     console.log('=============================================');
     console.log(`Time: ${getTimestamp()}`);
+    console.log(`Total Accounts: ${userConfigs.length}`);
+    const proxies = loadProxies();
+    console.log(`Total Proxies: ${proxies.length}`);
+    
+    const errorCount = previousStats.filter(stat => stat.status.startsWith('Error')).length;
+    let summaryStatus = 'All accounts are being processed';
+    if (errorCount > 0 && errorCount < userConfigs.length) {
+      summaryStatus = 'Some accounts have errors';
+    } else if (errorCount === userConfigs.length) {
+      summaryStatus = 'All accounts have errors';
+    }
+    console.log(`Summary Status: ${summaryStatus}`);
     console.log('---------------------------------------------');
-    console.log(`User: ${userData.email || 'N/A'}`);
-    console.log(`ID: ${userData.id || 'N/A'}`);
-    console.log(`Referral Code: ${userData.referral_code || 'N/A'}`);
-    console.log('---------------------------------------------');
-    console.log('VALIDATION STATISTICS:');
-    console.log(`✓ Valid Validations: ${userData.stats.stork_signed_prices_valid_count || 0}`);
-    console.log(`✗ Invalid Validations: ${userData.stats.stork_signed_prices_invalid_count || 0}`);
-    console.log(`↻ Last Validated At: ${userData.stats.stork_signed_prices_last_verified_at || 'Never'}`);
-    console.log(`👥 Referral Usage Count: ${userData.stats.referral_usage_count || 0}`);
-    console.log('---------------------------------------------');
-    console.log(`Next validation in ${config.stork.intervalSeconds} seconds...`);
+
+    const headers = ['Account', 'Valid', 'Invalid', 'Percentage', 'Last Validated At', 'Status', 'Proxy'];
+    const rows = userConfigs.map((config, index) => {
+      const stats = previousStats[index];
+      const total = stats.validCount + stats.invalidCount;
+      const percentage = total > 0 ? ((stats.validCount / total) * 100).toFixed(2) : '0.00';
+      return {
+        Account: config.cognito.username,
+        Valid: stats.validCount,
+        Invalid: stats.invalidCount,
+        Percentage: `${percentage}%`,
+        'Last Validated At': stats.lastValidatedAt,
+        Status: stats.status || 'Active',
+        Proxy: stats.proxy
+      };
+    });
+
+    console.table(rows.map(({ Account, Valid, Invalid, Percentage, 'Last Validated At': LastValidatedAt, Status, Proxy }) => ({
+      Account, Valid, Invalid, Percentage, 'Last Validated At': LastValidatedAt, Status, Proxy
+    })), headers);
     console.log('=============================================');
+    console.log('Telegram Channel: https://t.me/khampretairdrop');
+    console.log('Credit: https://t.me/AirdropInsiderID');
   }
 
   async function main() {
@@ -479,20 +478,24 @@ if (!isMainThread) {
       process.exit(1);
     }
     
-    const tokenManager = new TokenManager();
+    const tokenManagers = userConfigs.map(config => new TokenManager(config));
+    previousStats = userConfigs.map(() => ({ validCount: 0, invalidCount: 0, lastValidatedAt: 'Never', status: 'Active', proxy: 'None' }));
 
     try {
-      await tokenManager.getValidToken();
-      log('Initial authentication successful');
+      console.log('Processing... Please wait.');
+      await Promise.all(tokenManagers.map(tm => tm.getValidToken()));
 
-      runValidationProcess(tokenManager);
-      setInterval(() => runValidationProcess(tokenManager), config.stork.intervalSeconds * 1000);
-      setInterval(async () => {
-        await tokenManager.getValidToken();
-        log('Token refreshed via Cognito');
-      }, 50 * 60 * 1000);
+      userConfigs.forEach((_, index) => {
+        runValidationProcess(tokenManagers[index], index);
+        setInterval(() => runValidationProcess(tokenManagers[index], index), config.stork.intervalSeconds * 1000);
+        setInterval(async () => {
+          await tokenManagers[index].getValidToken();
+        }, 50 * 60 * 1000);
+      });
+
+      setInterval(displayAllStats, config.stork.intervalSeconds * 1000);
     } catch (error) {
-      log(`Application failed to start: ${error.message}`, 'ERROR');
+      console.error(`Application failed to start: ${error.message}`);
       process.exit(1);
     }
   }
