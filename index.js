@@ -471,6 +471,16 @@ if (!isMainThread) {
     console.log('=============================================');
     console.log('Telegram Channel: https://t.me/khampretairdrop');
     console.log('Credit: https://t.me/AirdropInsiderID');
+
+    // Countdown timer
+    let countdown = config.stork.intervalSeconds;
+    const countdownInterval = setInterval(() => {
+      process.stdout.write(`\rNext update in: ${countdown--} seconds`);
+      if (countdown < 0) {
+        clearInterval(countdownInterval);
+        //process.stdout.write('\rNext update in: 0 seconds\n');
+      }
+    }, 1000);
   }
 
   async function main() {

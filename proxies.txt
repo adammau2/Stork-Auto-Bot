@@ -1,4 +1,0 @@
-# Add your proxies here, one per line
-# Example:
-# http://username:password@proxyserver:port
-# socks5://username:password@proxyserver:port
