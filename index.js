@@ -413,7 +413,16 @@ if (!isMainThread) {
 
       updateStats(updatedUserData, accountIndex, proxies.length > 0 ? proxies[accountIndex % proxies.length] : null);
     } catch (error) {
-      previousStats[accountIndex].status = `Error: ${error.message}`;
+      if (error.message.includes('401')) {
+        try {
+          await tokenManager.refreshOrAuthenticate();
+          await runValidationProcess(tokenManager, accountIndex);
+        } catch (refreshError) {
+          previousStats[accountIndex].status = `Error: ${refreshError.message}`;
+        }
+      } else {
+        previousStats[accountIndex].status = `Error: ${error.message}`;
+      }
     }
   }
 
